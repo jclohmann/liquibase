@@ -45,7 +45,7 @@ liquibase:
 
       mariadb:
         imageName: mariadb
-        version: 10.3
+        version: 10.7
         setup:
           username: root
 
@@ -58,7 +58,9 @@ liquibase:
 
 
       mysql:
-        version: latest
+        # MySQL 8.0 is the latest major release.
+        # Subsequent minor releases can contain breaking changes.
+        version: 8.0
         imageName: mysql
         setup:
           username: root

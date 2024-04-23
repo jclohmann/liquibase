@@ -18,6 +18,7 @@ import liquibase.sql.Sql;
 import liquibase.sqlgenerator.SqlGeneratorFactory;
 import liquibase.statement.SqlStatement;
 import liquibase.statement.core.*;
+import liquibase.structure.DatabaseObject;
 import liquibase.structure.core.*;
 import liquibase.util.ISODateFormat;
 
@@ -214,6 +215,19 @@ public class SQLiteDatabase extends AbstractJdbcDatabase {
         return false;
     }
 
+
+
+    @Override
+    public boolean supports(Class<? extends DatabaseObject> object) {
+        if (Schema.class.isAssignableFrom(object)) {
+            return false;
+        }
+        if (Sequence.class.isAssignableFrom(object)) {
+            return false;
+        }
+        return super.supports(object);
+    }
+
     @Override
     public boolean supportsSchemas() {
         return false;
@@ -262,6 +276,11 @@ public class SQLiteDatabase extends AbstractJdbcDatabase {
         return false;
     }
 
+    @Override
+    public boolean supportsCreateIfNotExists(Class<? extends DatabaseObject> type) {
+        return type.isAssignableFrom(Table.class);
+    }
+
     public interface AlterTableVisitor {
         ColumnConfig[] getColumnsToAdd();
 
@@ -270,5 +289,10 @@ public class SQLiteDatabase extends AbstractJdbcDatabase {
         boolean createThisColumn(ColumnConfig column);
 
         boolean createThisIndex(Index index);
+    }
+
+    @Override
+    public boolean supportsDatabaseChangeLogHistory() {
+        return true;
     }
 }

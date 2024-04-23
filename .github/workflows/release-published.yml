@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Collect Data
         id: collect-data
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             let tag;
@@ -55,11 +55,11 @@ jobs:
 
   deploy_maven:
     name: Deploy to Maven
-    needs: [ setup, manual_trigger_deployment ]
+    needs: [ setup, manual_trigger_deployment, deploy_javadocs, publish_to_github_packages, deploy_xsd, release-docker ]
     runs-on: ubuntu-22.04
     steps:
       - name: Download release assets
-        uses: robinraju/release-downloader@v1.8
+        uses: robinraju/release-downloader@v1.10
         with:
           repository: "liquibase/liquibase"
           tag: "${{ needs.setup.outputs.tag }}"
@@ -67,7 +67,7 @@ jobs:
           out-file-path: "."
 
       - name: Set up Java for publishing to Maven Central Repository
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '11'
           distribution: 'adopt'
@@ -203,47 +203,47 @@ jobs:
             -DserverId=sonatype-nexus-staging \
             -DstagingRepositoryId=$stagingRepositoryId \
             -DstagingProgressTimeoutMinutes=10
-  
+
   deploy_javadocs:
     name: Upload Javadocs
-    needs: [ setup ]
+    needs: [ setup, manual_trigger_deployment ]
     runs-on: ubuntu-22.04
     # These permissions are needed to interact with GitHub's OIDC Token endpoint.
     permissions:
       id-token: write
       contents: read
     steps:
-    - name: Download release javadocs
-      uses: robinraju/release-downloader@v1.8
-      with:
-        repository: "liquibase/liquibase"
-        tag: "${{ needs.setup.outputs.tag }}"
-        filename: "liquibase-additional*.zip"
-        out-file-path: "."
+      - name: Download release javadocs
+        uses: robinraju/release-downloader@v1.10
+        with:
+          repository: "liquibase/liquibase"
+          tag: "${{ needs.setup.outputs.tag }}"
+          filename: "liquibase-additional*.zip"
+          out-file-path: "."
 
-    - name: Unpack javadoc files and upload to s3
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.JAVADOCS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.JAVADOCS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: us-east-1
-      # unzip archives, create directory for each jar, and extract jar contents to directory.  Then delete the jar and zip files.  Then upload to s3.
-      run: |
-        unzip -j '*.zip' '*javadoc*.jar' 
-        
-        for jar in *liquibase*.jar; do
-          dir_name=$(basename "$jar" .jar)
-          dir_name=$(echo "$dir_name" | sed -E 's/(-[0-9]+(\.[0-9]+)*(-javadoc)?)//')
-          mkdir -p "$dir_name"
-          unzip -o "$jar" -d "$dir_name"
-        done
-        
-        rm -rf *.jar *.zip
-        aws s3 sync . s3://javadocsliquibasecom-origin --only-show-errors
+      - name: Unpack javadoc files and upload to s3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JAVADOCS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JAVADOCS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        # unzip archives, create directory for each jar, and extract jar contents to directory.  Then delete the jar and zip files.  Then upload to s3.
+        run: |
+          unzip -j '*.zip' '*javadoc*.jar' 
+          
+          for jar in *liquibase*.jar; do
+            dir_name=$(basename "$jar" .jar)
+            dir_name=$(echo "$dir_name" | sed -E 's/(-[0-9]+(\.[0-9]+)*(-javadoc)?)//')
+            mkdir -p "$dir_name"
+            unzip -o "$jar" -d "$dir_name"
+          done
+          
+          rm -rf *.jar *.zip
+          aws s3 sync . s3://javadocsliquibasecom-origin --only-show-errors
 
   publish_to_github_packages:
     name: Publish artifacts to Github Packages
     runs-on: ubuntu-22.04
-    needs: [ setup ]
+    needs: [ setup, manual_trigger_deployment ]
     permissions:
       contents: read
       packages: write
@@ -251,7 +251,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Java for publishing to GitHub Repository
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -273,23 +273,24 @@ jobs:
           TARGET_ARTIFACT_REPOSITORY: liquibase
 
   deploy_xsd:
-      name: Upload xsds
-      needs: [ setup ]
-      runs-on: ubuntu-22.04
-      outputs:
-          tag: ${{ steps.collect-data.outputs.tag }}
-          version: ${{ needs.setup.outputs.version }}
-      steps:
+    name: Upload xsds
+    needs: [ setup, manual_trigger_deployment]
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.collect-data.outputs.tag }}
+      version: ${{ needs.setup.outputs.version }}
+    steps:
       - name: Download liquibase xsd
         uses: actions/checkout@v4
         with:
           # Relative path under $GITHUB_WORKSPACE to place the repository
-          path: liquibase-core-repo 
+          path: liquibase-core-repo
           repository: "liquibase/liquibase"
-    
+
       - name: Download liquibase-pro xsd
         uses: actions/checkout@v4
         with:
+          ref: release
           token: ${{ secrets.BOT_TOKEN }}
           # Relative path under $GITHUB_WORKSPACE to place the repository
           path: liquibase-pro-repo
@@ -329,7 +330,7 @@ jobs:
           host: ${{ secrets.WPENGINE_SFTP_HOST }}
           port: ${{ secrets.WPENGINE_SFTP_PORT }}
           username: ${{ secrets.WPENGINE_SFTP_USER }}
-          password: ${{ secrets.WPENGINE_SFTP_PASSWORD }} 
+          password: ${{ secrets.WPENGINE_SFTP_PASSWORD }}
           compress: true
           forceUpload: true
           localDir: 'liquibase-core-repo/liquibase-standard/src/main/resources/www.liquibase.org/xml/ns/dbchangelog/'
@@ -341,7 +342,7 @@ jobs:
           host: ${{ secrets.WPENGINE_SFTP_HOST }}
           port: ${{ secrets.WPENGINE_SFTP_PORT }}
           username: ${{ secrets.WPENGINE_SFTP_USER }}
-          password: ${{ secrets.WPENGINE_SFTP_PASSWORD }} 
+          password: ${{ secrets.WPENGINE_SFTP_PASSWORD }}
           compress: false
           forceUpload: true
           localDir: 'liquibase-pro-repo/pro/src/main/resources/www.liquibase.org/xml/ns/pro/'
@@ -353,7 +354,7 @@ jobs:
           host: ${{ secrets.WPENGINE_SFTP_HOST }}
           port: ${{ secrets.WPENGINE_SFTP_PORT }}
           username: ${{ secrets.WPENGINE_SFTP_USER }}
-          password: ${{ secrets.WPENGINE_SFTP_PASSWORD }} 
+          password: ${{ secrets.WPENGINE_SFTP_PASSWORD }}
           compress: false
           forceUpload: true
           localDir: 'liquibase-pro-repo/pro/src/main/resources/schemas/'
@@ -370,14 +371,14 @@ jobs:
           forceUpload: true
           localDir: 'index-file/'
           remoteDir: '/xml/ns/dbchangelog/'
-          
+
   release-docker:
     name: Release docker images
-    needs: [ setup ]
+    needs: [ setup, manual_trigger_deployment ]
     runs-on: ubuntu-22.04
     steps:
       - name: Release liquibase/docker v${{ needs.setup.outputs.version }}
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.BOT_TOKEN }}
           script: |
@@ -392,8 +393,21 @@ jobs:
                 }
              });
 
-  package-linux:
-    uses: liquibase/build-logic/.github/workflows/package-linux.yml@v0.5.7
+
+  generate-PRO-tag:
+    name: Generate PRO tags based on OSS release
+    needs: [ setup ]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.LIQUIBOT_PAT_GPM_ACCESS }}
+          repository: liquibase/liquibase-pro
+          event-type: oss-released-tag
+
+  package:
+    uses: liquibase/build-logic/.github/workflows/package.yml@v0.6.9
     needs: [ setup ]
     secrets: inherit
     with:

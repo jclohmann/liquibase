@@ -11,7 +11,7 @@ import liquibase.change.core.CreateTableChange;
 import liquibase.changelog.ChangeSet;
 import liquibase.command.CommandScope;
 import liquibase.command.core.GenerateChangelogCommandStep;
-import liquibase.command.core.helpers.DbUrlConnectionCommandStep;
+import liquibase.command.core.helpers.DbUrlConnectionArgumentsCommandStep;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
@@ -35,7 +35,6 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
-import java.sql.SQLException;
 import java.util.*;
 
 import static org.junit.Assert.assertEquals;
@@ -261,12 +260,33 @@ public class PostgreSQLIntegrationTest extends AbstractIntegrationTest {
 
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             new CommandScope(GenerateChangelogCommandStep.COMMAND_NAME)
-                    .addArgumentValue(DbUrlConnectionCommandStep.DATABASE_ARG, getDatabase())
+                    .addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, getDatabase())
                     .setOutput(baos)
                     .execute();
 
             assertTrue(baos.toString().contains(textToTest));
 
+    }
+
+    @Test
+    public void testGeneratedClobColumn() throws Exception {
+        assumeNotNull(getDatabase());
+        assumeTrue(getDatabase().getDatabaseMajorVersion() >= 12);
+        clearDatabase();
+        String textToTest = "GENERATED ALWAYS AS ((surname || ', '::text) || forename) STORED";
+
+        Scope.getCurrentScope().getSingleton(ExecutorService.class).getExecutor("jdbc", getDatabase())
+            .execute(new RawSqlStatement(String.format(
+                    "CREATE TABLE generated_text_test (fullname text %s, surname text, forename text)",
+                    textToTest)));
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        new CommandScope(GenerateChangelogCommandStep.COMMAND_NAME)
+            .addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, getDatabase())
+            .setOutput(baos)
+            .execute();
+
+        assertTrue(baos.toString().contains(textToTest));
     }
 
     @Test
@@ -298,5 +318,28 @@ public class PostgreSQLIntegrationTest extends AbstractIntegrationTest {
 
         assertEquals(tableList.size(), 1);
         assertEquals(tableList.iterator().next().getName(), "permissiondeniedtable");
+    }
+
+    @Test
+    public void runYamlChangelog() throws Exception {
+        if (getDatabase() == null) {
+            return;
+        }
+
+        Liquibase liquibase = createLiquibase(completeChangeLog);
+        clearDatabase();
+
+        //run again to test changelog testing logic
+        liquibase = createLiquibase("changelogs/yaml/create.procedure.back.compatibility.changelog.yaml");
+        liquibase.setChangeLogParameter("loginuser", testSystem.getUsername());
+
+        try {
+            liquibase.update(this.contexts);
+        } catch (ValidationFailedException e) {
+            e.printDescriptiveError(System.out);
+            throw e;
+        }
+
+
     }
 }

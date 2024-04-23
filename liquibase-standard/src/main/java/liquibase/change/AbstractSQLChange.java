@@ -50,6 +50,7 @@ public abstract class AbstractSQLChange extends AbstractChange implements DbmsTa
      * @deprecated  To be removed when splitStatements is changed to be type Boolean
      *
      */
+    @Deprecated
     private boolean splitStatementsSet;
 
     private String endDelimiter;
@@ -292,7 +293,7 @@ public abstract class AbstractSQLChange extends AbstractChange implements DbmsTa
             returnStatements.add(new RawSqlStatement(processedSQL, getEndDelimiter()));
             return returnStatements.toArray(EMPTY_SQL_STATEMENT);
         }
-        for (String statement : StringUtil.processMultiLineSQL(processedSQL, isStripComments(), isSplitStatements(), getEndDelimiter())) {
+        for (String statement : StringUtil.processMultiLineSQL(processedSQL, isStripComments(), isSplitStatements(), getEndDelimiter(), getChangeSet())) {
             if (database instanceof MSSQLDatabase) {
                 statement = statement.replaceAll("\\n", "\r\n");
             }

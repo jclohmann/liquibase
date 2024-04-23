@@ -4,8 +4,12 @@ import liquibase.GlobalConfiguration;
 import liquibase.Labels;
 import liquibase.Scope;
 import liquibase.change.Change;
+import liquibase.change.ReplaceIfExists;
 import liquibase.change.core.*;
 import liquibase.changelog.ChangeSet;
+import liquibase.changeset.ChangeSetService;
+import liquibase.changeset.ChangeSetServiceFactory;
+import liquibase.command.core.helpers.AbstractChangelogCommandStep;
 import liquibase.configuration.core.DeprecatedConfigurationValueProvider;
 import liquibase.database.*;
 import liquibase.database.core.*;
@@ -30,6 +34,7 @@ import liquibase.statement.core.RawSqlStatement;
 import liquibase.structure.DatabaseObject;
 import liquibase.structure.core.Column;
 import liquibase.structure.core.StoredDatabaseLogic;
+import liquibase.structure.core.Table;
 import liquibase.util.DependencyUtil;
 import liquibase.util.StreamUtil;
 import liquibase.util.StringUtil;
@@ -41,6 +46,8 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class DiffToChangeLog {
@@ -60,11 +67,26 @@ public class DiffToChangeLog {
     private String changeSetLabels;
     private String changeSetAuthor;
     private String changeSetPath;
+    private String[] changeSetRunOnChangeTypes;
+    private String[] changeReplaceIfExistsTypes;
     private DiffResult diffResult;
     private final DiffOutputControl diffOutputControl;
     private boolean tryDbaDependencies = true;
 
+    private boolean skipObjectSorting = false;
+
     private static final Set<Class> loggedOrderFor = new HashSet<>();
+
+    /**
+     * Creates a new DiffToChangeLog with the given DiffResult and default DiffOutputControl
+     * @param diffResult the DiffResult to convert to a ChangeLog
+     * @param diffOutputControl the DiffOutputControl to use to control the output
+     * @param skipObjectSorting if true, will skip dependency object sorting. This can be useful on databases that have a lot of packages/procedures that are linked to each other
+     */
+    public DiffToChangeLog(DiffResult diffResult, DiffOutputControl diffOutputControl, boolean skipObjectSorting) {
+        this(diffResult, diffOutputControl);
+        this.skipObjectSorting = skipObjectSorting;
+    }
 
     public DiffToChangeLog(DiffResult diffResult, DiffOutputControl diffOutputControl) {
         this.diffResult = diffResult;
@@ -72,14 +94,14 @@ public class DiffToChangeLog {
         respectSchemaAndCatalogCaseIfNeeded(diffOutputControl);
     }
 
+    public DiffToChangeLog(DiffOutputControl diffOutputControl) {
+        this.diffOutputControl = diffOutputControl;
+    }
+
     private void respectSchemaAndCatalogCaseIfNeeded(DiffOutputControl diffOutputControl) {
         if (this.diffResult.getComparisonSnapshot().getDatabase() instanceof AbstractDb2Database) {
             diffOutputControl.setRespectSchemaAndCatalogCase(true);
         }
-    }
-
-    public DiffToChangeLog(DiffOutputControl diffOutputControl) {
-        this.diffOutputControl = diffOutputControl;
     }
 
     public void setDiffResult(DiffResult diffResult) {
@@ -238,14 +260,13 @@ public class DiffToChangeLog {
 
         Scope.getCurrentScope().getLog(getClass()).info("changeSets count: " + changeSets.size());
         if (changeSets.isEmpty()) {
-            Scope.getCurrentScope().getLog(getClass()).info("No changesets to add.");
+            Scope.getCurrentScope().getLog(getClass()).info("No changesets to add to the changelog output.");
         } else {
             Scope.getCurrentScope().getLog(getClass()).info(file + " does not exist, creating and adding " + changeSets.size() + " changesets.");
-        }
-
-        try (OutputStream stream = file.openOutputStream(new OpenOptions());
-             PrintStream out = new PrintStream(stream, true, GlobalConfiguration.OUTPUT_FILE_ENCODING.getCurrentValue())) {
-            changeLogSerializer.write(changeSets, out);
+            try (OutputStream stream = file.openOutputStream(new OpenOptions());
+                 PrintStream out = new PrintStream(stream, true, GlobalConfiguration.OUTPUT_FILE_ENCODING.getCurrentValue())) {
+                 changeLogSerializer.write(changeSets, out);
+            }
         }
     }
 
@@ -287,6 +308,7 @@ public class DiffToChangeLog {
             for (Map.Entry<? extends DatabaseObject, ObjectDifferences> entry : diffResult.getChangedObjects(type, comparator).entrySet()) {
                 if (!diffResult.getReferenceSnapshot().getDatabase().isLiquibaseObject(entry.getKey()) && !diffResult.getReferenceSnapshot().getDatabase().isSystemObject(entry.getKey())) {
                     Change[] changes = changeGeneratorFactory.fixChanged(entry.getKey(), entry.getValue(), diffOutputControl, diffResult.getReferenceSnapshot().getDatabase(), diffResult.getComparisonSnapshot().getDatabase());
+                    setReplaceIfExistsTrueIfApplicable(changes);
                     addToChangeSets(changes, updateChangeSets, quotingStrategy, created);
                 }
             }
@@ -311,6 +333,7 @@ public class DiffToChangeLog {
             ObjectQuotingStrategy quotingStrategy = diffOutputControl.getObjectQuotingStrategy();
 
             Change[] changes = changeGeneratorFactory.fixMissing(object, diffOutputControl, diffResult.getReferenceSnapshot().getDatabase(), diffResult.getComparisonSnapshot().getDatabase());
+            setReplaceIfExistsTrueIfApplicable(changes);
             addToChangeSets(changes, createChangeSets, quotingStrategy, created);
         }
 
@@ -322,6 +345,7 @@ public class DiffToChangeLog {
             for (DatabaseObject object : sortUnexpectedObjects(diffResult.getUnexpectedObjects(type, comparator), diffResult.getReferenceSnapshot().getDatabase())) {
                 if (!diffResult.getComparisonSnapshot().getDatabase().isLiquibaseObject(object) && !diffResult.getComparisonSnapshot().getDatabase().isSystemObject(object)) {
                     Change[] changes = changeGeneratorFactory.fixUnexpected(object, diffOutputControl, diffResult.getReferenceSnapshot().getDatabase(), diffResult.getComparisonSnapshot().getDatabase());
+                    setReplaceIfExistsTrueIfApplicable(changes);
                     addToChangeSets(changes, deleteChangeSets, quotingStrategy, created);
                 }
             }
@@ -340,16 +364,26 @@ public class DiffToChangeLog {
         return changeSets;
     }
 
+    private void setReplaceIfExistsTrueIfApplicable(Change[] changes) {
+        if(changes !=null && diffOutputControl.isReplaceIfExistsSet()) {
+            for(int i=0; i < changes.length; i++) {
+                if (changes[i] instanceof ReplaceIfExists) {
+                    ((ReplaceIfExists) changes[i]).setReplaceIfExists(true);
+                }
+            }
+        }
+    }
+
     //
     // Because the generated changeset list can contain both add and drop
     // FK changes with the same constraint name, we make sure that the
     // drop FK goes first
     //
     private List<ChangeSet> bringDropFKToTop(List<ChangeSet> changeSets) {
-        List<ChangeSet> dropFk = changeSets.stream().filter(cs -> {
-            return cs.getChanges().stream().anyMatch(ch -> ch instanceof DropForeignKeyConstraintChange);
-        }).collect(Collectors.toList());
-        if (dropFk == null || dropFk.isEmpty()) {
+        List<ChangeSet> dropFk = changeSets.stream().filter(cs ->
+            cs.getChanges().stream().anyMatch(DropForeignKeyConstraintChange.class::isInstance)
+        ).collect(Collectors.toList());
+        if (dropFk.isEmpty()) {
             return changeSets;
         }
         List<ChangeSet> returnList = new ArrayList<>();
@@ -435,8 +469,10 @@ public class DiffToChangeLog {
                                 schemaName = obj.getSchema().getName();
                             }
 
-                            String name = schemaName + "." + obj.getName();
-                            if (dependencyOrder.contains(name)) {
+                            String objectName = obj.getName();
+                            String name = schemaName + "." + objectName;
+                            if (dependencyOrder.contains(name) ||
+                                dependencyOrder.contains(convertStoredLogicObjectName(schemaName, objectName, database))) {
                                 toSort.add(obj);
                             } else {
                                 toNotSort.add(obj);
@@ -447,6 +483,15 @@ public class DiffToChangeLog {
                     }
 
                     toSort.sort((o1, o2) -> {
+                        //
+                        // For Postgres, make tables appear before stored logic
+                        //
+                        if (database instanceof PostgresDatabase) {
+                            Integer x = determineOrderingForTablesAndStoredLogic(o1, o2);
+                            if (x != null) {
+                                return x;
+                            }
+                        }
                         String o1Schema = null;
                         if (o1.getSchema() != null) {
                             o1Schema = o1.getSchema().getName();
@@ -472,9 +517,62 @@ public class DiffToChangeLog {
                 }
             } catch (DatabaseException e) {
                 Scope.getCurrentScope().getLog(getClass()).fine("Cannot get object dependencies: " + e.getMessage());
+            } catch (StackOverflowError e) {
+                Scope.getCurrentScope().getLog(getClass()).warning("You have too many or recursive database object dependencies! " +
+                        "Liquibase is going to ignore dependency sorting and resume processing. To skip this message " +
+                        "(and save a lot of processing time) use flag " + AbstractChangelogCommandStep.SKIP_OBJECT_SORTING.getName(), e);
             }
         }
         return new ArrayList<>(objects);
+    }
+
+    private static Integer determineOrderingForTablesAndStoredLogic(DatabaseObject o1, DatabaseObject o2) {
+        if (o1 instanceof Table && o2 instanceof StoredDatabaseLogic) {
+            return -1;
+        }
+        if (o1 instanceof StoredDatabaseLogic && o2 instanceof Table) {
+            return 1;
+        }
+        return null;
+    }
+
+    /**
+     *
+     * POSTGRES ONLY:
+     *
+     * If we have a stored logic object then we edit the name
+     * to replace the parameter list with a list of just the types.
+     * This is the format that the dependency computation puts out.
+     *
+     * Example:  calculate_bonus(emp_salary numeric, emp_name character varying) becomes
+     *           calculate_bonus(numeric, character varying)
+     *
+     * @param  objectName     The input object name to work on
+     * @return String
+     *
+     */
+    private static String convertStoredLogicObjectName(String schemaName, String objectName, Database database) {
+        String name = schemaName + "." + objectName;
+        if (! (database instanceof PostgresDatabase) || ! (objectName.contains("(") && objectName.contains(")"))) {
+            return name;
+        }
+        Pattern p = Pattern.compile(".*?[(]+(.*)?[)]+[\\s]*?$");
+        Matcher m = p.matcher(objectName);
+        if (m.matches()) {
+            String originalParameters = m.group(1);
+            String editedParameters = originalParameters;
+            String[] parameters = m.group(1).split(",");
+            for (String parameter : parameters) {
+                parameter = parameter.trim();
+                String[] parts = parameter.split(" ");
+                String[] rest = Arrays.copyOfRange(parts, 1, parts.length);
+                String part = StringUtil.join(rest, " ");
+                editedParameters = editedParameters.replace(parameter, part);
+            }
+            name = schemaName + "." + objectName.replace(originalParameters, editedParameters)
+                                                .replace(", ",",");
+        }
+        return name;
     }
 
     private List<Map<String, ?>> queryForDependenciesOracle(Executor executor, List<String> schemas)
@@ -496,9 +594,7 @@ public class DiffToChangeLog {
             //   to stop the recursion
             //
             String message = dbe.getMessage();
-            if (!message.contains("ORA-00942: table or view does not exist")) {
-                throw new DatabaseException(dbe);
-            } else if (!tryDbaDependencies) {
+            if (!message.contains("ORA-00942") || !tryDbaDependencies) {
                 throw new DatabaseException(dbe);
             }
             Scope.getCurrentScope().getLog(getClass()).warning("Unable to query DBA_DEPENDENCIES table. Switching to USER_DEPENDENCIES");
@@ -512,6 +608,9 @@ public class DiffToChangeLog {
      * Used by {@link #sortMissingObjects(Collection, Database)} to determine whether to go into the sorting logic.
      */
     protected boolean supportsSortingObjects(Database database) {
+        if (this.skipObjectSorting) {
+            return false;
+        }
         return (database instanceof AbstractDb2Database) || (database instanceof MSSQLDatabase) || (database instanceof
                 OracleDatabase) || database instanceof PostgresDatabase;
     }
@@ -745,30 +844,29 @@ public class DiffToChangeLog {
 
     private void addToChangeSets(Change[] changes, List<ChangeSet> changeSets, ObjectQuotingStrategy quotingStrategy, String created) {
         if (changes != null) {
-            String csContext = this.changeSetContext;
-
-            if (diffOutputControl.getContext() != null) {
-                csContext = diffOutputControl.getContext().toString().replaceFirst("^\\(", "")
-                        .replaceFirst("\\)$", "");
-            }
-
+            ChangeSetService service = ChangeSetServiceFactory.getInstance().createChangeSetService();
             if (useSeparateChangeSets(changes)) {
                 for (Change change : changes) {
+                    final boolean runOnChange = isContainedInRunOnChangeTypes(change);
                     ChangeSet changeSet =
-                       new ChangeSet(generateId(changes), getChangeSetAuthor(), false, false, this.changeSetPath, changeSetContext,
-                            null, true, quotingStrategy, null);
+                            service.createChangeSet(generateId(changes), getChangeSetAuthor(), false, runOnChange, this.changeSetPath, changeSetContext,
+                                    null, null, null, true, quotingStrategy, null);
                     changeSet.setCreated(created);
                     if (diffOutputControl.getLabels() != null) {
                         changeSet.setLabels(diffOutputControl.getLabels());
                     } else {
                         changeSet.setLabels(new Labels(this.changeSetLabels));
                     }
+                    if (change instanceof ReplaceIfExists && isContainedInReplaceIfExistsTypes(change)) {
+                        ((ReplaceIfExists) change).setReplaceIfExists(true);
+                    }
                     changeSet.addChange(change);
                     changeSets.add(changeSet);
                 }
             } else {
-                ChangeSet changeSet = new ChangeSet(generateId(changes), getChangeSetAuthor(), false, false, this.changeSetPath, csContext,
-                        null, true, quotingStrategy, null);
+                final boolean runOnChange = Arrays.asList(changes).stream().allMatch(this::isContainedInRunOnChangeTypes);
+                ChangeSet changeSet = service.createChangeSet(generateId(changes), getChangeSetAuthor(), false, runOnChange, this.changeSetPath, changeSetContext,
+                                        null, null, null, true, quotingStrategy, null);
                 changeSet.setCreated(created);
                 if (diffOutputControl.getLabels() != null) {
                     changeSet.setLabels(diffOutputControl.getLabels());
@@ -776,6 +874,9 @@ public class DiffToChangeLog {
                     changeSet.setLabels(new Labels(this.changeSetLabels));
                 }
                 for (Change change : changes) {
+                    if (change instanceof ReplaceIfExists && isContainedInReplaceIfExistsTypes(change)) {
+                        ((ReplaceIfExists) change).setReplaceIfExists(true);
+                    }
                     changeSet.addChange(change);
                 }
                 changeSets.add(changeSet);
@@ -834,6 +935,30 @@ public class DiffToChangeLog {
 
     public void setChangeSetPath(String changeSetPath) {
         this.changeSetPath = changeSetPath;
+    }
+
+    public void setChangeSetRunOnChangeTypes(final String[] runOnChangeTypes) {
+        changeSetRunOnChangeTypes = runOnChangeTypes;
+    }
+
+    protected String[] getChangeSetRunOnChangeTypes() {
+        return changeSetRunOnChangeTypes;
+    }
+
+    private boolean isContainedInRunOnChangeTypes(final Change change) {
+        return getChangeSetRunOnChangeTypes() != null && Arrays.asList(getChangeSetRunOnChangeTypes()).contains(change.getSerializedObjectName());
+    }
+
+    public void setChangeReplaceIfExistsTypes(final String[] replaceIfExistsTypes) {
+        changeReplaceIfExistsTypes = replaceIfExistsTypes;
+    }
+
+    protected String[] getChangeReplaceIfExistsTypes() {
+        return changeReplaceIfExistsTypes;
+    }
+
+    private boolean isContainedInReplaceIfExistsTypes(final Change change) {
+        return getChangeReplaceIfExistsTypes() != null && Arrays.asList(getChangeReplaceIfExistsTypes()).contains(change.getSerializedObjectName());
     }
 
     public void setIdRoot(String idRoot) {
@@ -985,20 +1110,10 @@ public class DiffToChangeLog {
             }
         }
 
-
-        private Node getNode(Class<? extends DatabaseObject> type) {
-            Node node = allNodes.get(type);
-            if (node == null) {
-                node = new Node(type);
-            }
-            return node;
-        }
-
-
         static class Node {
             public final Class<? extends DatabaseObject> type;
-            public final HashSet<Edge> inEdges;
-            public final HashSet<Edge> outEdges;
+            public final Set<Edge> inEdges;
+            public final Set<Edge> outEdges;
 
             public Node(Class<? extends DatabaseObject> type) {
                 this.type = type;

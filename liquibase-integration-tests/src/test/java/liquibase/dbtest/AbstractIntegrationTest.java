@@ -12,13 +12,11 @@ import liquibase.command.CommandScope;
 import liquibase.command.core.DropAllCommandStep;
 import liquibase.command.core.SnapshotCommandStep;
 import liquibase.command.core.UpdateCommandStep;
-import liquibase.command.core.helpers.DbUrlConnectionCommandStep;
+import liquibase.command.core.helpers.DbUrlConnectionArgumentsCommandStep;
 import liquibase.database.Database;
 import liquibase.database.DatabaseConnection;
 import liquibase.database.DatabaseFactory;
-import liquibase.database.core.H2Database;
-import liquibase.database.core.OracleDatabase;
-import liquibase.database.core.PostgresDatabase;
+import liquibase.database.core.*;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.datatype.DataTypeFactory;
 import liquibase.datatype.core.ClobType;
@@ -71,6 +69,7 @@ import java.util.stream.Collectors;
 import static liquibase.test.SnapshotAssert.assertThat;
 import static org.junit.Assert.*;
 import static org.junit.Assume.assumeNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Base class for all database integration tests.  There is an AbstractIntegrationTest subclass for each supported database.
@@ -204,11 +203,11 @@ public abstract class AbstractIntegrationTest {
             String altSchema = testSystem.getAltSchema();
             String altCatalog = testSystem.getAltCatalog();
 
-            if (database.supportsSchemas()) {
+            if (database.supports(Schema.class)) {
                 emptyTestSchema(null, altSchema, database);
             }
             if (supportsAltCatalogTests()) {
-                if (database.supportsSchemas() && database.supportsCatalogs()) {
+                if (database.supports(Schema.class) && database.supports(Catalog.class)) {
                     emptyTestSchema(altCatalog, altSchema, database);
                 }
             }
@@ -265,7 +264,7 @@ public abstract class AbstractIntegrationTest {
     }
 
     protected boolean supportsAltCatalogTests() {
-        return database.supportsCatalogs();
+        return database.supports(Catalog.class);
     }
 
     protected Properties createProperties() {
@@ -289,7 +288,7 @@ public abstract class AbstractIntegrationTest {
             }
             try {
                 CommandScope commandScope = new CommandScope(DropAllCommandStep.COMMAND_NAME);
-                commandScope.addArgumentValue(DbUrlConnectionCommandStep.DATABASE_ARG, database);
+                commandScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, database);
                 commandScope.execute();
             } catch (Exception ignored) {
             }
@@ -757,7 +756,7 @@ public abstract class AbstractIntegrationTest {
         if (database.getShortName().equalsIgnoreCase("mssql")) {
             return; // not possible on MSSQL.
         }
-        if (!database.supportsSchemas()) {
+        if (!database.supports(Schema.class)) {
             return;
         }
 
@@ -1275,7 +1274,7 @@ public abstract class AbstractIntegrationTest {
         try {
             getDatabase().setDatabaseChangeLogTableName("lowercase");
             CommandScope commandScope = new CommandScope(UpdateCommandStep.COMMAND_NAME);
-            commandScope.addArgumentValue(DbUrlConnectionCommandStep.DATABASE_ARG, getDatabase());
+            commandScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, getDatabase());
             commandScope.addArgumentValue(UpdateCommandStep.CHANGELOG_FILE_ARG, objectQuotingStrategyChangeLog);
             commandScope.execute();
         } catch (Exception e) {
@@ -1291,12 +1290,12 @@ public abstract class AbstractIntegrationTest {
         try {
             Database database = getDatabase();
             CommandScope commandScope = new CommandScope(UpdateCommandStep.COMMAND_NAME);
-            commandScope.addArgumentValue(DbUrlConnectionCommandStep.DATABASE_ARG, database);
+            commandScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, database);
             commandScope.addArgumentValue(UpdateCommandStep.CHANGELOG_FILE_ARG, indexWithAssociatedWithChangeLog);
             commandScope.execute();
 
             final CommandScope snapshotScope = new CommandScope("snapshot");
-            snapshotScope.addArgumentValue(DbUrlConnectionCommandStep.DATABASE_ARG, database);
+            snapshotScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, database);
             snapshotScope.addArgumentValue(SnapshotCommandStep.SNAPSHOT_FORMAT_ARG, "json");
             CommandResults results = snapshotScope.execute();
             DatabaseSnapshot snapshot = (DatabaseSnapshot) results.getResult("snapshot");
@@ -1308,6 +1307,48 @@ public abstract class AbstractIntegrationTest {
             clearDatabase();
         }
 
+    }
+
+    @Test
+    public void makeSureNoErrorIsReturnedWhenTableNameIsNotSpecified() throws DatabaseException {
+        // This is a test to validate most of the DBs do not throw an error when tableName is not
+        // specified as part of primaryKeyExistsPrecondition.
+        clearDatabase();
+        String errorMsg = "";
+        try {
+            runUpdate("changelogs/common/preconditions/preconditions.changelog.xml");
+        }catch(CommandExecutionException e) {
+            errorMsg = e.getMessage();
+        }
+        finally {
+            clearDatabase();
+        }
+
+        if(!(database instanceof H2Database || database instanceof MySQLDatabase || database instanceof HsqlDatabase
+                || database instanceof SQLiteDatabase || database instanceof DB2Database)) {
+            Assert.assertTrue(errorMsg.isEmpty());
+        }
+    }
+
+    @Test
+    public void makeSureErrorIsReturnedWhenTableNameIsNotSpecified() throws DatabaseException {
+        // This is a test to validate some DBs do require a tableName as part of primaryKeyExistsPrecondition,
+        // if it's not specified an error will be thrown.
+        clearDatabase();
+        String errorMsg = "";
+        try {
+            runUpdate("changelogs/common/preconditions/preconditions.changelog.xml");
+        }catch(CommandExecutionException e) {
+            errorMsg = e.getMessage();
+        }
+        finally {
+            clearDatabase();
+        }
+
+        if(database instanceof H2Database || database instanceof MySQLDatabase || database instanceof HsqlDatabase
+                || database instanceof SQLiteDatabase || database instanceof DB2Database) {
+            Assert.assertTrue(errorMsg.contains("Database driver requires a table name to be specified in order to search for a primary key."));
+        }
     }
 
     private ProcessBuilder prepareExternalLiquibaseProcess() {
@@ -1332,9 +1373,9 @@ public abstract class AbstractIntegrationTest {
 
     protected void runUpdate(String changelog) throws CommandExecutionException {
         CommandScope commandScope = new CommandScope(UpdateCommandStep.COMMAND_NAME);
-        commandScope.addArgumentValue(DbUrlConnectionCommandStep.URL_ARG, testSystem.getConnectionUrl());
-        commandScope.addArgumentValue(DbUrlConnectionCommandStep.USERNAME_ARG, testSystem.getUsername());
-        commandScope.addArgumentValue(DbUrlConnectionCommandStep.PASSWORD_ARG, testSystem.getPassword());
+        commandScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.URL_ARG, testSystem.getConnectionUrl());
+        commandScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.USERNAME_ARG, testSystem.getUsername());
+        commandScope.addArgumentValue(DbUrlConnectionArgumentsCommandStep.PASSWORD_ARG, testSystem.getPassword());
         commandScope.addArgumentValue(UpdateCommandStep.CHANGELOG_FILE_ARG, changelog);
         commandScope.execute();
     }
